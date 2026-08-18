@@ -5,6 +5,7 @@
 import os
 import sqlite3
 
+from extract import iter_cards
 from load import db_connection
 from pipeline import CSV_PATH, DB_PATH, run
 
@@ -65,6 +66,24 @@ def verify_rollback_and_close_on_exception():
     check("예외가 나도 커넥션은 finally에서 close된다", closed)
 
 
+def verify_generator_closes_file_on_early_exit():
+    """iter_cards는 제너레이터라 `with open(...)`이 즉시 실행되지 않고, 처음 소비되는
+    순간(next())에야 열린다. 이 테스트는 그 파일을 끝까지 순회하지 않고 도중에
+    gen.close()로 강제 종료했을 때도 with 블록의 __exit__이 실행되어 파일이 닫히는지
+    확인한다: gen.close()는 일시정지된 제너레이터 프레임에 GeneratorExit을 던지고,
+    이 예외가 with 블록을 빠져나가면서 파일을 닫는다."""
+    gen = iter_cards(CSV_PATH)
+    check("제너레이터를 만든 시점엔 아직 with 블록이 실행되지 않아 f가 없다", "f" not in gen.gi_frame.f_locals)
+
+    first_row = next(gen)  # with open(...) 실행 -> 첫 행까지 진행 -> yield에서 일시정지
+    f = gen.gi_frame.f_locals["f"]  # 일시정지된 제너레이터 프레임에서 지역변수 f(파일 객체)를 직접 참조
+    check("첫 행을 소비했다", first_row["front"] != "")
+    check("for 루프를 끝까지 돌지 않았는데도 파일은 아직 열려 있다", not f.closed)
+
+    gen.close()
+    check("gen.close() -> GeneratorExit -> with __exit__ 실행으로 파일이 닫힌다", f.closed)
+
+
 if __name__ == "__main__":
     print("=== 1) 성공 경로: 스트리밍 적재 + commit 확인 ===")
     verify_success_path()
@@ -76,5 +95,9 @@ if __name__ == "__main__":
     print()
     print("=== 3) 예외 발생 시 rollback + close 확인 ===")
     verify_rollback_and_close_on_exception()
+
+    print()
+    print("=== 4) yield + with: 제너레이터를 도중에 close()해도 파일이 닫히는지 확인 ===")
+    verify_generator_closes_file_on_early_exit()
 
     os.remove(DB_PATH)
